@@ -1,6 +1,6 @@
 #pragma once
 
-#include "framequeue.h"
+#include "IRenderer.hpp"
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -11,7 +11,6 @@ extern "C" {
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <functional>
 #include <mutex>
 
 struct RendererConfig {
@@ -23,30 +22,24 @@ struct RendererConfig {
     AVRational frameRate{};
 };
 
-class Renderer {
+class Renderer : public IRenderer {
 public:
-    using FrameCallback = std::function<void(VideoFrame)>;
-    using DoneCallback = std::function<void()>;
-
     explicit Renderer(const RendererConfig &config);
-    ~Renderer();
+    ~Renderer() override;
 
     Renderer(const Renderer &) = delete;
     Renderer &operator=(const Renderer &) = delete;
 
-    // Blocking render loop. Calls onFrame for each RGB frame, onDone at end.
-    void run(FrameCallback onFrame, DoneCallback onDone = nullptr);
-    void stop();
+    // IRenderer interface
+    void run(FrameCallback onFrame, DoneCallback onDone = nullptr) override;
+    void stop() override;
+    void play() override;
+    void pause() override;
+    bool isPlaying() const override { return m_isPlaying.load(); }
+    double currentTime() const override { return m_currentTime.load(); }
+    void setDuration(double d) override { m_duration = d; }
 
-    // Playback control (thread-safe)
-    void play();
-    void pause();
     void resetTiming();
-    bool isPlaying() const { return m_isPlaying.load(); }
-
-    // Progress (thread-safe, polled from any thread)
-    double currentTime() const { return m_currentTime.load(); }
-    void setDuration(double d) { m_duration = d; }
 
 private:
     bool initSwsContext();

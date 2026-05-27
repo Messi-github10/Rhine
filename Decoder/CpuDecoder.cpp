@@ -1,76 +1,65 @@
-#include "decoder.h"
+#include "CpuDecoder.hpp"
+#include "Demuxer.hpp"
 
-#include <cstdio>
+#include <spdlog/spdlog.h>
 #include <cmath>
 
-Decoder::Decoder(const DecoderConfig &config)
+CpuDecoder::CpuDecoder(const DecoderConfig &config)
     : m_config(config)
     , m_queue(config.frameQueue)
 {
 }
 
-Decoder::~Decoder() {
+CpuDecoder::~CpuDecoder() {
     if (m_codecCtx) {
         avcodec_free_context(&m_codecCtx);
     }
-    if (m_fmtCtx) {
-        avformat_close_input(&m_fmtCtx);
-    }
 }
 
-bool Decoder::open() {
-    if (avformat_open_input(&m_fmtCtx, m_config.filePath.c_str(), nullptr, nullptr) < 0) {
-        std::fprintf(stderr, "[Decoder] Failed to open: %s\n", m_config.filePath.c_str());
-        return false;
-    }
+bool CpuDecoder::open() {
+    // --- Format layer: open via Demuxer ---
+    DemuxerConfig demuxCfg;
+    demuxCfg.filePath = m_config.filePath;
 
-    if (avformat_find_stream_info(m_fmtCtx, nullptr) < 0) {
-        std::fprintf(stderr, "[Decoder] Failed to find stream info\n");
-        return false;
-    }
+    m_demuxer = std::make_unique<Demuxer>(demuxCfg);
+    if (!m_demuxer->open()) return false;
 
-    m_videoStreamIdx = av_find_best_stream(m_fmtCtx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    if (m_videoStreamIdx < 0) {
-        std::fprintf(stderr, "[Decoder] No video stream found\n");
-        return false;
-    }
+    int vidx = m_demuxer->bestVideoStream();
+    AVCodecParameters *codecpar = m_demuxer->codecParams(vidx);
+    AVStream *stream = m_demuxer->stream(vidx);
 
-    AVStream *stream = m_fmtCtx->streams[m_videoStreamIdx];
-    const AVCodec *codec = avcodec_find_decoder(stream->codecpar->codec_id);
+    // --- Codec layer: open software decoder ---
+    const AVCodec *codec = avcodec_find_decoder(codecpar->codec_id);
     if (!codec) {
-        std::fprintf(stderr, "[Decoder] Codec not found\n");
+        spdlog::error("[CpuDecoder] Codec not found");
         return false;
     }
 
     m_codecCtx = avcodec_alloc_context3(codec);
     if (!m_codecCtx) {
-        std::fprintf(stderr, "[Decoder] Failed to alloc codec context\n");
+        spdlog::error("[CpuDecoder] Failed to alloc codec context");
         return false;
     }
 
-    if (avcodec_parameters_to_context(m_codecCtx, stream->codecpar) < 0) {
-        std::fprintf(stderr, "[Decoder] Failed to copy codec params\n");
+    if (avcodec_parameters_to_context(m_codecCtx, codecpar) < 0) {
+        spdlog::error("[CpuDecoder] Failed to copy codec params");
         return false;
     }
 
     if (avcodec_open2(m_codecCtx, codec, nullptr) < 0) {
-        std::fprintf(stderr, "[Decoder] Failed to open codec\n");
+        spdlog::error("[CpuDecoder] Failed to open codec");
         return false;
     }
 
+    // --- Metadata ---
     m_width = m_codecCtx->width;
     m_height = m_codecCtx->height;
     m_pixelFormat = m_codecCtx->pix_fmt;
     m_timeBase = stream->time_base;
-    m_frameRate = av_guess_frame_rate(m_fmtCtx, stream, nullptr);
+    m_frameRate = av_guess_frame_rate(m_demuxer->formatContext(), stream, nullptr);
+    m_duration = m_demuxer->duration();
 
-    // Duration in seconds
-    if (stream->duration > 0)
-        m_duration = stream->duration * av_q2d(stream->time_base);
-    else if (m_fmtCtx->duration > 0)
-        m_duration = (double)m_fmtCtx->duration / AV_TIME_BASE;
-
-    std::fprintf(stderr, "[Decoder] Opened: %dx%d, fps=%d/%d, time_base=%d/%d, duration=%.1fs\n",
+    spdlog::info("[CpuDecoder] Opened: {}x{}, fps={}/{}, time_base={}/{}, duration={:.1f}s",
                  m_width, m_height,
                  m_frameRate.num, m_frameRate.den,
                  m_timeBase.num, m_timeBase.den,
@@ -78,62 +67,52 @@ bool Decoder::open() {
     return true;
 }
 
-void Decoder::seek(double targetSec, std::function<void()> onComplete) {
+void CpuDecoder::seek(double targetSec, std::function<void()> onComplete) {
     m_seekTargetSec = targetSec;
     m_onSeekComplete = std::move(onComplete);
     m_seekRequested = true;
 }
 
-void Decoder::doSeek() {
-    AVStream *stream = m_fmtCtx->streams[m_videoStreamIdx];
+void CpuDecoder::doSeek() {
+    int vidx = m_demuxer->bestVideoStream();
+    AVStream *stream = m_demuxer->stream(vidx);
 
-    // Convert target seconds → stream time_base PTS
     int64_t seekTarget = av_rescale_q(
-        (int64_t)(m_seekTargetSec * AV_TIME_BASE),
+        static_cast<int64_t>(m_seekTargetSec * AV_TIME_BASE),
         AV_TIME_BASE_Q,
         stream->time_base);
 
-    // Clamp to valid range
     if (seekTarget < 0) seekTarget = 0;
     if (stream->duration > 0 && seekTarget > stream->duration)
         seekTarget = stream->duration;
 
-    // Seek to nearest keyframe BEFORE target
-    int ret = av_seek_frame(m_fmtCtx, m_videoStreamIdx,
-                            seekTarget, AVSEEK_FLAG_BACKWARD);
-    if (ret < 0) {
-        std::fprintf(stderr, "[Decoder] Seek failed: %d\n", ret);
+    if (!m_demuxer->seek(m_seekTargetSec, vidx)) {
+        spdlog::error("[CpuDecoder] Seek failed");
     }
 
-    // Flush codec internal buffers
     avcodec_flush_buffers(m_codecCtx);
-
-    // Discard all queued frames from old position
     m_queue->clear();
-
-    // Mark PTS to skip to (forward-decode approach)
     m_seekToPts = seekTarget;
-
     m_seekRequested = false;
 
-    // Notify that seek is complete (unpause renderer)
     if (m_onSeekComplete) {
         m_onSeekComplete();
         m_onSeekComplete = nullptr;
     }
 }
 
-void Decoder::run() {
+void CpuDecoder::run() {
     AVPacket *pkt = av_packet_alloc();
     AVFrame *decFrame = av_frame_alloc();
 
+    int vidx = m_demuxer->bestVideoStream();
+
     while (!m_stop) {
-        // --- Check for seek request ---
         if (m_seekRequested.load()) {
             doSeek();
         }
 
-        int ret = av_read_frame(m_fmtCtx, pkt);
+        int ret = m_demuxer->readPacket(pkt);
         if (ret < 0) {
             if (ret == AVERROR_EOF) {
                 // flush decoder
@@ -152,18 +131,18 @@ void Decoder::run() {
                 break;
             }
             if (ret == AVERROR(EAGAIN)) continue;
+            if (ret == AVERROR_EXIT) break;
             break;
         }
 
-        if (pkt->stream_index == m_videoStreamIdx) {
+        if (pkt->stream_index == vidx) {
             avcodec_send_packet(m_codecCtx, pkt);
             while (avcodec_receive_frame(m_codecCtx, decFrame) == 0) {
-                // Forward-decode: skip frames before seek target PTS
                 if (m_seekToPts != AV_NOPTS_VALUE && decFrame->pts < m_seekToPts) {
                     av_frame_unref(decFrame);
                     continue;
                 }
-                m_seekToPts = AV_NOPTS_VALUE;  // reached target
+                m_seekToPts = AV_NOPTS_VALUE;
 
                 AVFrame *clone = av_frame_clone(decFrame);
                 if (clone) {
@@ -180,6 +159,7 @@ void Decoder::run() {
     av_packet_free(&pkt);
 }
 
-void Decoder::stop() {
+void CpuDecoder::stop() {
     m_stop = true;
+    if (m_demuxer) m_demuxer->interrupt();
 }

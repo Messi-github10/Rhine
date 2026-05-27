@@ -1,23 +1,23 @@
-#include "videodisplay.hpp"
+#include "VulkanDisplay.hpp"
 
 #include <QSGSimpleTextureNode>
 #include <QSGTexture>
 
-VideoDisplay::VideoDisplay(QQuickItem *parent)
+VulkanDisplay::VulkanDisplay(QQuickItem *parent)
     : QQuickItem(parent)
 {
     setFlag(QQuickItem::ItemHasContents, true);
     setSmooth(false);
 }
 
-void VideoDisplay::setFrame(const QImage &image) {
+void VulkanDisplay::setFrame(const QImage &image) {
     if (m_frame == image) return;
     m_frame = image;
     emit frameChanged();
-    update();  // trigger repaint -> updatePaintNode
+    update();
 }
 
-QSGNode *VideoDisplay::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *) {
+QSGNode *VulkanDisplay::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *) {
     auto *node = static_cast<QSGSimpleTextureNode *>(oldNode);
     if (!node) {
         node = new QSGSimpleTextureNode();
@@ -35,7 +35,7 @@ QSGNode *VideoDisplay::updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *) 
     }
     texture->setFiltering(QSGTexture::Linear);
 
-    node->setTexture(texture);  // node takes ownership
+    node->setTexture(texture);
     node->setRect(boundingRect());
 
     return node;

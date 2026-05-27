@@ -6,10 +6,12 @@
 #include <memory>
 #include <thread>
 
-#include "framequeue.h"
+#include "FrameQueue.hpp"
 
-class Renderer;
-class Decoder;
+#include <vulkan/vulkan.h>
+
+class IRenderer;
+class IDecoder;
 class VideoDisplay;
 
 class PlayerController : public QObject {
@@ -54,13 +56,20 @@ private:
 
     // Pipeline (heap, owned)
     std::unique_ptr<BoundedQueue<AVFramePtr>> m_frameQueue;
-    std::unique_ptr<Decoder> m_decoder;
-    std::unique_ptr<Renderer> m_renderer;
+    std::unique_ptr<IDecoder> m_decoder;
+    std::unique_ptr<IRenderer> m_renderer;
     std::thread m_decodeThread;
     std::thread m_renderThread;
 
     VideoDisplay *m_videoDisplay = nullptr;
     QTimer m_pollTimer;
+
+    // Vulkan surface (created from Qt window, owned by controller)
+    VkSurfaceKHR m_vulkanSurface = VK_NULL_HANDLE;
+
+    // Resize signal connections (disconnected in stopPipeline)
+    QMetaObject::Connection m_resizeWConn;
+    QMetaObject::Connection m_resizeHConn;
 
     double m_currentTime = 0.0;
     double m_duration = 0.0;

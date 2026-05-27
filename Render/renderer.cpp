@@ -1,4 +1,4 @@
-#include "renderer.h"
+#include "renderer.hpp"
 
 #include <cstdio>
 #include <thread>
@@ -111,7 +111,9 @@ void Renderer::run(FrameCallback onFrame, DoneCallback onDone) {
                 auto targetTime = m_startTime +
                     std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                         std::chrono::duration<double>(elapsed + m_pauseAccumulated));
-                std::this_thread::sleep_until(targetTime);
+                std::unique_lock lock(m_pauseMutex);
+                m_pauseCV.wait_until(lock, targetTime, [this] { return m_stop.load(); });
+                if (m_stop) break;
             }
             m_currentTime = ptsToSec(frame->pts, m_config.timeBase);
         }
